@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Android build artifacts
+android/build/
+android/.gradle/
+android/app/build/
+android/local.properties
+
+# iOS build artifacts
+ios/build/
+ios/Pods/
+ios/DerivedData/
+
+# Keys & secrets
+*.keystore
+*.jks
+.env
+.env.*
+
+# Metro bundler cache
+.metro-health-check*
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
