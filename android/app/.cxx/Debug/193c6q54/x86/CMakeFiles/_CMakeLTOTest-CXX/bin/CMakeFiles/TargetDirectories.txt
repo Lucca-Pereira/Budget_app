@@ -1,0 +1,4 @@
+C:/Users/lucca/Budget_app/android/app/.cxx/Debug/193c6q54/x86/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/foo.dir
+C:/Users/lucca/Budget_app/android/app/.cxx/Debug/193c6q54/x86/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/boo.dir
+C:/Users/lucca/Budget_app/android/app/.cxx/Debug/193c6q54/x86/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/edit_cache.dir
+C:/Users/lucca/Budget_app/android/app/.cxx/Debug/193c6q54/x86/CMakeFiles/_CMakeLTOTest-CXX/bin/CMakeFiles/rebuild_cache.dir

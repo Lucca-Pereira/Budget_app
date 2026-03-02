@@ -1,11 +1,13 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import {Category, Expense, AppSettings, RolloverMap} from '../types';
+import {Category, Expense, AppSettings, RolloverMap, Subscription} from '../types';
 
 const KEYS = {
-  CATEGORIES: '@budget_categories',
-  EXPENSES:   '@budget_expenses',
-  SETTINGS:   '@budget_settings',
-  ROLLOVERS:  '@budget_rollovers',
+  CATEGORIES:    '@budget_categories',
+  EXPENSES:      '@budget_expenses',
+  SETTINGS:      '@budget_settings',
+  ROLLOVERS:     '@budget_rollovers',
+  SUBSCRIPTIONS: '@budget_subscriptions',
+  ONBOARDED:     '@budget_onboarded',
 };
 
 export const getSettings = async (): Promise<AppSettings> => {
@@ -40,4 +42,20 @@ export const getRollovers = async (): Promise<RolloverMap> => {
 };
 export const saveRollovers = async (map: RolloverMap): Promise<void> => {
   await AsyncStorage.setItem(KEYS.ROLLOVERS, JSON.stringify(map));
+};
+
+export const getSubscriptions = async (): Promise<Subscription[]> => {
+  const raw = await AsyncStorage.getItem(KEYS.SUBSCRIPTIONS);
+  return raw ? JSON.parse(raw) : [];
+};
+export const saveSubscriptions = async (subs: Subscription[]): Promise<void> => {
+  await AsyncStorage.setItem(KEYS.SUBSCRIPTIONS, JSON.stringify(subs));
+};
+
+export const getHasOnboarded = async (): Promise<boolean> => {
+  const raw = await AsyncStorage.getItem(KEYS.ONBOARDED);
+  return raw === 'true';
+};
+export const setHasOnboarded = async (): Promise<void> => {
+  await AsyncStorage.setItem(KEYS.ONBOARDED, 'true');
 };

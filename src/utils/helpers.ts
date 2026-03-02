@@ -46,6 +46,28 @@ export const nextMonth = (monthKey: string): string => {
   return format(addMonths(new Date(y, m - 1, 1), 1), 'yyyy-MM');
 };
 
+/**
+ * Returns the current week number of the month (1-4)
+ * Week 1 = days 1-7, Week 2 = days 8-14, Week 3 = days 15-21, Week 4 = days 22+
+ */
+export const currentWeekOfMonth = (): number => {
+  const day = new Date().getDate();
+  if (day <= 7) return 1;
+  if (day <= 14) return 2;
+  if (day <= 21) return 3;
+  return 4;
+};
+
+/** Returns expenses within a specific week of a month */
+export const expensesForWeek = (expenses: Expense[], month: string, week: number): Expense[] => {
+  const weekStart = (week - 1) * 7 + 1;
+  const weekEnd = week === 4 ? 31 : week * 7;
+  return expensesForMonth(expenses, month).filter(e => {
+    const day = parseInt(e.date.split('-')[2], 10);
+    return day >= weekStart && day <= weekEnd;
+  });
+};
+
 export const expensesForMonth = (expenses: Expense[], month: string): Expense[] =>
   expenses.filter(e => e.date.startsWith(month));
 
