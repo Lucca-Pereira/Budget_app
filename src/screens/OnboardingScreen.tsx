@@ -28,10 +28,6 @@ const TEMPLATES: {
       {name: 'Groceries', icon: '🛒', color: '#6BCB77', budget: 150, isFixed: false, rollover: false, weeklyTracking: true,  expectedAmount: 0, buffer: 0, subCategories: []},
       {name: 'Fuel', icon: '⛽', color: '#FFA36C', budget: 80,  isFixed: false, rollover: false, weeklyTracking: true,  expectedAmount: 0, buffer: 0, subCategories: []},
       {name: 'Going Out', icon: '🎉', color: '#C77DFF', budget: 100, isFixed: false, rollover: true,  weeklyTracking: true,  expectedAmount: 0, buffer: 0, subCategories: []},
-      {name: 'Books & Supplies', icon: '📚', color: '#FFD93D', budget: 50,  isFixed: false, rollover: true,  weeklyTracking: false, expectedAmount: 0, buffer: 0, subCategories: []},
-      {name: 'Transport', icon: '🚌', color: '#4CC9F0', budget: 60,  isFixed: false, rollover: false, weeklyTracking: false, expectedAmount: 0, buffer: 0, subCategories: []},
-      {name: 'Subscriptions', icon: '📱', color: '#F72585', budget: 30,  isFixed: true,  rollover: false, weeklyTracking: false, expectedAmount: 0, buffer: 0, subCategories: []},
-      {name: 'Health', icon: '💊', color: '#FF6B6B', budget: 40,  isFixed: false, rollover: true,  weeklyTracking: false, expectedAmount: 0, buffer: 0, subCategories: []},
     ],
   },
   {
@@ -42,12 +38,8 @@ const TEMPLATES: {
     categories: [
       {name: 'Mortgage / Rent', icon: '🏠', color: '#4D96FF', budget: 1200, isFixed: true,  rollover: false, weeklyTracking: false, expectedAmount: 0,   buffer: 0,  subCategories: []},
       {name: 'Groceries',       icon: '🛒', color: '#6BCB77', budget: 400,  isFixed: false, rollover: false, weeklyTracking: true,  expectedAmount: 0,   buffer: 0,  subCategories: []},
-      {name: 'Electricity',     icon: '⚡', color: '#FFD93D', budget: 0,    isFixed: false, rollover: false, weeklyTracking: false, expectedAmount: 100, buffer: 30, subCategories: []},
-      {name: 'Water',           icon: '💧', color: '#4CC9F0', budget: 0,    isFixed: false, rollover: false, weeklyTracking: false, expectedAmount: 50,  buffer: 15, subCategories: []},
       {name: 'Fuel',            icon: '⛽', color: '#FFA36C', budget: 200,  isFixed: false, rollover: false, weeklyTracking: false, expectedAmount: 0,   buffer: 0,  subCategories: []},
-      {name: 'Kids',            icon: '🧒', color: '#C77DFF', budget: 300,  isFixed: false, rollover: true,  weeklyTracking: false, expectedAmount: 0,   buffer: 0,  subCategories: [{id: uuidv4(), name: 'School', icon: '🏫', budget: 0}, {id: uuidv4(), name: 'Activities', icon: '⚽', budget: 0}]},
       {name: 'Going Out',       icon: '🍽️', color: '#F72585', budget: 200,  isFixed: false, rollover: true,  weeklyTracking: false, expectedAmount: 0,   buffer: 0,  subCategories: []},
-      {name: 'Health',          icon: '💊', color: '#FF6B6B', budget: 100,  isFixed: false, rollover: true,  weeklyTracking: false, expectedAmount: 0,   buffer: 0,  subCategories: []},
     ],
   },
   {
@@ -149,15 +141,6 @@ export default function OnboardingScreen({onFinish}: {onFinish: () => void}) {
         <Text style={styles.stepTitle}>What's your monthly budget?</Text>
         <Text style={styles.stepSub}>Don't worry, you can change this any time in Settings.</Text>
         <View style={styles.budgetCard}>
-          <Text style={styles.label}>Currency symbol</Text>
-          <TextInput
-            style={styles.input}
-            placeholder="€"
-            placeholderTextColor={colors.textSecondary}
-            value={currency}
-            onChangeText={setCurrency}
-            maxLength={4}
-          />
           <Text style={styles.label}>Monthly income / allowance</Text>
           <TextInput
             style={styles.input}
@@ -166,6 +149,15 @@ export default function OnboardingScreen({onFinish}: {onFinish: () => void}) {
             placeholderTextColor={colors.textSecondary}
             value={income}
             onChangeText={setIncome}
+          />
+          <Text style={styles.label}>Currency symbol</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="€"
+            placeholderTextColor={colors.textSecondary}
+            value={currency}
+            onChangeText={setCurrency}
+            maxLength={4}
           />
           <Text style={styles.hintText}>This is used to show how much you have remaining each month.</Text>
         </View>

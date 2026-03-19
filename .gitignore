@@ -5,6 +5,7 @@ node_modules/
 android/build/
 android/.gradle/
 android/app/build/
+android/app/.cxx/
 android/local.properties
 
 # iOS build artifacts

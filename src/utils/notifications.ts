@@ -30,13 +30,24 @@ import notifee, {
   TimestampTrigger,
 } from '@notifee/react-native';
 
-const CHANNEL_ID = 'budget-reminder';
+const CHANNEL_ID      = 'budget-reminder';
+const BANK_CHANNEL_ID = 'bank-transactions';
 const NOTIFICATION_ID = 'daily-reminder';
 
 async function ensureChannel(): Promise<void> {
   await notifee.createChannel({
     id: CHANNEL_ID,
     name: 'Daily Expense Reminder',
+    importance: AndroidImportance.HIGH,
+    sound: 'default',
+    vibration: true,
+  });
+}
+
+async function ensureBankChannel(): Promise<void> {
+  await notifee.createChannel({
+    id: BANK_CHANNEL_ID,
+    name: 'Bank Transactions',
     importance: AndroidImportance.HIGH,
     sound: 'default',
     vibration: true,
@@ -155,4 +166,33 @@ export async function scheduleDailyReminder(
 /** Cancel the daily reminder */
 export async function cancelDailyReminder(): Promise<void> {
   await notifee.cancelTriggerNotification(NOTIFICATION_ID);
+}
+
+/**
+ * Fire a one-shot system tray notification for an unknown bank merchant.
+ * The notification ID is derived from the transaction ID so it is idempotent —
+ * calling this twice for the same txId will simply replace the first notification.
+ */
+export async function fireBankTransactionNotification(params: {
+  txId: string;
+  merchantName: string;
+  amount: number;
+  currency: string;
+  suggestedCategory?: string | null;
+}): Promise<void> {
+  await ensureBankChannel();
+  const body = params.suggestedCategory
+    ? `${params.currency}${params.amount.toFixed(2)} · Suggested: ${params.suggestedCategory} — open app to categorise`
+    : `${params.currency}${params.amount.toFixed(2)} · Tap to open app and categorise`;
+  await notifee.displayNotification({
+    id: `bank_tx_${params.txId}`,
+    title: `🏦 ${params.merchantName}`,
+    body,
+    android: {
+      channelId: BANK_CHANNEL_ID,
+      pressAction: {id: 'default'},
+      smallIcon: 'ic_launcher',
+      importance: AndroidImportance.HIGH,
+    },
+  });
 }

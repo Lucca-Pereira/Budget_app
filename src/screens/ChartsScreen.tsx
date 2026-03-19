@@ -1,3 +1,10 @@
+/**
+ * ChartsScreen.tsx
+ *
+ * Visual spending breakdown with:
+ *  - Donut (pie) chart — spending by category for the selected month
+ *  - Bar chart — total spend across the last 6 months
+ */
 import React, {useMemo, useState} from 'react';
 import {View, Text, ScrollView, TouchableOpacity, StyleSheet, Dimensions} from 'react-native';
 import {BarChart, PieChart} from 'react-native-gifted-charts';
@@ -69,6 +76,7 @@ export default function ChartsScreen() {
                 donut
                 radius={100}
                 innerRadius={60}
+                innerCircleColor={colors.surface}
                 centerLabelComponent={() => (
                   <View style={s.centerLabel}>
                     <Text style={s.centerLabelSub}>Total</Text>
@@ -96,27 +104,31 @@ export default function ChartsScreen() {
 
       <View style={s.card}>
         <Text style={s.cardTitle}>Last 6 Months</Text>
-        <BarChart
-          data={barData}
-          width={CHART_WIDTH}
-          height={180}
-          barWidth={32}
-          spacing={12}
-          roundedTop
-          roundedBottom
-          hideRules
-          xAxisThickness={0}
-          yAxisThickness={0}
-          yAxisTextStyle={{color: colors.textSecondary, fontSize: 10}}
-          xAxisLabelTextStyle={{color: colors.textSecondary, fontSize: 11}}
-          noOfSections={4}
-          maxValue={Math.max(...barData.map(d => d.value), 1) * 1.2}
-          isAnimated
-          animationDuration={600}
-          barBorderRadius={6}
-          backgroundColor={colors.surface}
-          labelWidth={30}
-        />
+        {barData.every(d => d.value === 0) ? (
+          <Text style={s.empty}>No spending data yet.</Text>
+        ) : (
+          <BarChart
+            data={barData}
+            width={CHART_WIDTH}
+            height={180}
+            barWidth={32}
+            spacing={12}
+            roundedTop
+            roundedBottom
+            hideRules
+            xAxisThickness={0}
+            yAxisThickness={0}
+            yAxisTextStyle={{color: colors.textSecondary, fontSize: 10}}
+            xAxisLabelTextStyle={{color: colors.textSecondary, fontSize: 11}}
+            noOfSections={4}
+            maxValue={Math.max(...barData.map(d => d.value), 1) * 1.2}
+            isAnimated
+            animationDuration={600}
+            barBorderRadius={6}
+            backgroundColor={colors.surface}
+            labelWidth={30}
+          />
+        )}
       </View>
     </ScrollView>
   );

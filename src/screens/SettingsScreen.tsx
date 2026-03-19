@@ -1,21 +1,218 @@
-import React, {useState, useEffect, useRef} from 'react';
+/**
+ * SettingsScreen.tsx
+ *
+ * App-wide configuration screen, organised into sections:
+ *  - Categories — list, edit, delete, add via swipeable bottom sheet
+ *  - Budget — currency symbol and monthly income (auto-saves on blur)
+ *  - Appearance — light/dark/system mode and colour palette picker
+ *  - Notifications — daily reminder toggle and time picker
+ *  - More — navigation shortcuts to Subscriptions and Income
+ *  - Bank — full bank connection, sync, and disconnect UI
+ *  - Data — export all expenses as CSV
+ *
+ * BottomSheet: custom modal that slides up from the bottom.
+ * Pan responder is attached only to the drag handle at the top —
+ * scrolling inside the form content never triggers a dismiss.
+ */
+import React, {useState, useEffect, useRef, useCallback} from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
   StyleSheet, Alert, Share, Platform, Modal, Pressable,
-  PanResponder, Animated, Switch,
+  PanResponder, Animated, Switch, Linking, ActivityIndicator,
 } from 'react-native';
-import notifee, {AndroidNotificationSetting} from '@notifee/react-native';
+import DateTimePicker from '@react-native-community/datetimepicker';
+import {useNavigation} from '@react-navigation/native';
 import {v4 as uuidv4} from 'uuid';
 import {useBudget} from '../context/BudgetContext';
 import {useTheme, ThemeMode} from '../context/ThemeContext';
 import {PALETTES, PaletteKey, spacing, typography} from '../theme';
 import {buildCSV} from '../utils/helpers';
-import {requestPermissions, scheduleDailyReminder, cancelDailyReminder} from '../utils/notifications';
-import {format} from 'date-fns';
-import {Category, SubCategory} from '../types';
+import {
+  requestPermissions, scheduleDailyReminder, cancelDailyReminder,
+  fireBankTransactionNotification,
+} from '../utils/notifications';
+import {
+  isBankConnected, clearBankTokens, getBankAuthUrl,
+  fetchBankTransactions, saveBankTokens, BankTransaction,
+  categoriseTransactions, classifyCredit,
+} from '../utils/bankApi';
+import * as storage from '../utils/storage';
+import {
+  getBankFirstSynced, setBankFirstSynced,
+  getBankLastSyncDate, saveBankLastSyncDate,
+  getMerchantMap, saveMerchantEntry,
+  getImportedTxIds, addImportedTxIds,
+} from '../utils/storage';
+import {format, subDays} from 'date-fns';
+import {Category, SubCategory, BankNotification, Expense} from '../types';
+import {ConfirmModal, ToastModal} from '../components/AppModals';
 
 const PRESET_COLORS = ['#FF6B6B','#FFA36C','#FFD93D','#6BCB77','#4D96FF','#C77DFF','#F72585','#4CC9F0'];
 const PRESET_ICONS  = ['🏠','🚗','🍔','🛒','💊','🎬','✈️','👕','📚','💻','🎮','🐾','💪','☕','🍷','💰'];
+
+/** Returns a darkened version of a hex colour (e.g. for "saved" state buttons). */
+function darkenColor(hex: string, pct = 25): string {
+  const n = parseInt(hex.replace('#', ''), 16);
+  const r = Math.max(0, (n >> 16) - Math.round(2.55 * pct));
+  const g = Math.max(0, ((n >> 8) & 0xff) - Math.round(2.55 * pct));
+  const b = Math.max(0, (n & 0xff) - Math.round(2.55 * pct));
+  return '#' + ((r << 16) | (g << 8) | b).toString(16).padStart(6, '0');
+}
+
+// ─── Bank period picker ───────────────────────────────────────────────────────
+
+interface PeriodOption {
+  label: string;
+  description: string;
+  getFromDate: () => string | null;
+  isCustom?: boolean;
+}
+
+const PERIOD_OPTIONS: PeriodOption[] = [
+  {
+    label: 'Last 7 days',
+    description: 'Only very recent transactions',
+    getFromDate: () => format(subDays(new Date(), 7), 'yyyy-MM-dd'),
+  },
+  {
+    label: 'Last 30 days',
+    description: 'About one month back',
+    getFromDate: () => format(subDays(new Date(), 30), 'yyyy-MM-dd'),
+  },
+  {
+    label: 'All time',
+    description: 'Everything available from your bank',
+    getFromDate: () => null,
+  },
+  {
+    label: 'Custom date…',
+    description: 'Pick any specific start date',
+    getFromDate: () => null,
+    isCustom: true,
+  },
+];
+
+function makeBankNotification(
+  tx: BankTransaction,
+  categoryId: string | null,
+  subCategoryId: string | null,
+): BankNotification {
+  return {
+    id: uuidv4(),
+    txId: tx.id,
+    date: tx.date,
+    amount: tx.amount,
+    type: tx.type,
+    merchantName: tx.merchantName ?? tx.description,
+    description: tx.description,
+    suggestedCategoryId: categoryId,
+    suggestedSubCategoryId: subCategoryId,
+  };
+}
+
+function PeriodPickerModal({
+  visible,
+  onConfirm,
+  onCancel,
+}: {
+  visible: boolean;
+  onConfirm: (fromDate: string | null) => void;
+  onCancel: () => void;
+}) {
+  const {colors} = useTheme();
+  const [selected, setSelected] = useState(1); // default: Last 30 days
+  const [customDate, setCustomDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  const handleConfirm = () => {
+    const opt = PERIOD_OPTIONS[selected];
+    if (opt.isCustom) {
+      onConfirm(format(customDate, 'yyyy-MM-dd'));
+    } else {
+      onConfirm(opt.getFromDate());
+    }
+  };
+
+  return (
+    <Modal transparent statusBarTranslucent animationType="slide" visible={visible} onRequestClose={onCancel}>
+      <Pressable style={ppStyles.overlay} onPress={onCancel}>
+        <View style={[ppStyles.sheet, {backgroundColor: colors.surface}]}>
+          <View style={[ppStyles.handle, {backgroundColor: colors.border}]} />
+          <Text style={[ppStyles.title, {color: colors.text}]}>Import transactions from…</Text>
+          <Text style={[ppStyles.subtitle, {color: colors.textSecondary}]}>
+            Choose how far back to pull your bank history. You can always sync more later.
+          </Text>
+
+          {PERIOD_OPTIONS.map((opt, idx) => (
+            <TouchableOpacity
+              key={opt.label}
+              style={[
+                ppStyles.option,
+                {borderColor: colors.border, backgroundColor: colors.background},
+                selected === idx && {borderColor: colors.primary, backgroundColor: colors.primary + '15'},
+              ]}
+              onPress={() => {
+                setSelected(idx);
+                if (opt.isCustom) setShowDatePicker(true);
+              }}
+              activeOpacity={0.75}>
+              <View style={[ppStyles.radio, {borderColor: selected === idx ? colors.primary : colors.border}]}>
+                {selected === idx && <View style={[ppStyles.radioDot, {backgroundColor: colors.primary}]} />}
+              </View>
+              <View style={{flex: 1}}>
+                <Text style={[ppStyles.optionLabel, {color: colors.text}, selected === idx && {color: colors.primary, fontWeight: '700'}]}>
+                  {opt.isCustom && selected === idx
+                    ? `From ${format(customDate, 'dd MMM yyyy')}`
+                    : opt.label}
+                </Text>
+                <Text style={[ppStyles.optionDesc, {color: colors.textSecondary}]}>{opt.description}</Text>
+              </View>
+            </TouchableOpacity>
+          ))}
+
+          {showDatePicker && (
+            <DateTimePicker
+              value={customDate}
+              mode="date"
+              display="default"
+              maximumDate={new Date()}
+              onChange={(_, date) => {
+                setShowDatePicker(false);
+                if (date) setCustomDate(date);
+              }}
+            />
+          )}
+
+          <TouchableOpacity
+            style={[ppStyles.confirmBtn, {backgroundColor: colors.primary}]}
+            onPress={handleConfirm}>
+            <Text style={ppStyles.confirmBtnText}>Import Transactions</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={ppStyles.cancelBtn} onPress={onCancel}>
+            <Text style={[ppStyles.cancelBtnText, {color: colors.textSecondary}]}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      </Pressable>
+    </Modal>
+  );
+}
+
+const ppStyles = StyleSheet.create({
+  overlay: {flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end'},
+  sheet: {borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: spacing.lg, paddingBottom: 40},
+  handle: {width: 36, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: 16},
+  title: {fontSize: 19, fontWeight: '700', marginBottom: 6, textAlign: 'center'},
+  subtitle: {fontSize: 13, textAlign: 'center', lineHeight: 19, marginBottom: 20},
+  option: {flexDirection: 'row', alignItems: 'center', borderWidth: 1.5, borderRadius: 12, padding: 14, marginBottom: 10},
+  radio: {width: 20, height: 20, borderRadius: 10, borderWidth: 2, alignItems: 'center', justifyContent: 'center', marginRight: 12},
+  radioDot: {width: 10, height: 10, borderRadius: 5},
+  optionLabel: {fontSize: 15, fontWeight: '600'},
+  optionDesc: {fontSize: 12, marginTop: 2},
+  confirmBtn: {borderRadius: 14, padding: 15, alignItems: 'center', marginTop: 8},
+  confirmBtnText: {color: '#fff', fontSize: 16, fontWeight: '700'},
+  cancelBtn: {padding: 12, alignItems: 'center'},
+  cancelBtnText: {fontSize: 14},
+});
 
 // ─── Swipeable bottom sheet ───────────────────────────────────────────────────
 function BottomSheet({visible, onClose, title, children}: {
@@ -23,37 +220,48 @@ function BottomSheet({visible, onClose, title, children}: {
 }) {
   const {colors} = useTheme();
   const s = makeStyles(colors);
-  const translateY = useRef(new Animated.Value(0)).current;
+  const dragY = useRef(new Animated.Value(0)).current;
 
+  const dismiss = onClose;
+
+  // Pan ONLY on the drag handle area at the top
   const pan = useRef(PanResponder.create({
-    onMoveShouldSetPanResponder: (_, g) => g.dy > 8 && Math.abs(g.dy) > Math.abs(g.dx),
-    onPanResponderMove: (_, g) => { if (g.dy > 0) translateY.setValue(g.dy); },
+    onStartShouldSetPanResponder: () => true,
+    onPanResponderMove: (_, g) => { if (g.dy > 0) dragY.setValue(g.dy); },
     onPanResponderRelease: (_, g) => {
-      if (g.dy > 80 || g.vy > 0.5) {
-        Animated.timing(translateY, {toValue: 800, duration: 200, useNativeDriver: true}).start(onClose);
+      dragY.setValue(0);
+      if (g.dy > 60 || g.vy > 0.8) {
+        dismiss();
       } else {
-        Animated.spring(translateY, {toValue: 0, useNativeDriver: true}).start();
+        Animated.spring(dragY, {toValue: 0, useNativeDriver: true, damping: 20}).start();
       }
     },
   })).current;
 
-  useEffect(() => { if (visible) translateY.setValue(0); }, [visible]);
-
   return (
-    <Modal visible={visible} transparent statusBarTranslucent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={s.sheetOverlay} onPress={onClose}>
-        <Animated.View style={[s.sheetCard, {transform: [{translateY}]}]}>
-          <View {...pan.panHandlers} style={s.sheetHeader}>
-            <Text style={s.sheetTitle}>{title}</Text>
-            <TouchableOpacity onPress={onClose} hitSlop={{top:8,bottom:8,left:8,right:8}}>
-              <Text style={s.sheetClose}>✕</Text>
-            </TouchableOpacity>
+    <Modal visible={visible} transparent statusBarTranslucent animationType="slide" onRequestClose={dismiss}>
+      <View style={s.sheetOverlay}>
+        <Animated.View style={[s.sheetCard, {transform: [{translateY: dragY}]}]}>
+          {/* Drag handle — ONLY this zone triggers swipe-to-dismiss */}
+          <View {...pan.panHandlers} style={s.sheetHandleArea}>
+            <View style={s.sheetDragBar} />
+            <View style={s.sheetTitleRow}>
+              <Text style={s.sheetTitle}>{title}</Text>
+              <TouchableOpacity onPress={dismiss} hitSlop={{top:8,bottom:8,left:8,right:8}}>
+                <Text style={s.sheetClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-          <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled" contentContainerStyle={{paddingBottom: 32}}>
+          {/* Content scroll — fully isolated, never dismisses */}
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            contentContainerStyle={{paddingBottom: 40}}
+          >
             {children}
           </ScrollView>
         </Animated.View>
-      </Pressable>
+      </View>
     </Modal>
   );
 }
@@ -185,15 +393,34 @@ function SettingsRow({icon, label, hint, onPress, right, noBorder}: {
 
 // ─── Main screen ──────────────────────────────────────────────────────────────
 export default function SettingsScreen() {
+  const navigation = useNavigation<any>();
   const {colors, themeMode, setThemeMode, paletteKey, setPaletteKey} = useTheme();
   const s = makeStyles(colors);
-  const {categories, expenses, settings, addCategory, deleteCategory, updateCategory, updateSettings} = useBudget();
+  const {
+    categories, expenses, incomeEvents, settings,
+    addCategory, deleteCategory, updateCategory, updateSettings, reload,
+    addBankNotifications, bankNotifications, addExpense, addIncomeEvent,
+  } = useBudget();
 
   const [income, setIncome] = useState(String(settings.incomeAmount));
   const [currency, setCurrency] = useState(settings.currency);
+  const [budgetSaved, setBudgetSaved] = useState(false);
   const [notifEnabled, setNotifEnabled] = useState(settings.notificationsEnabled);
   const [reminderHour, setReminderHour] = useState(String(settings.reminderHour));
   const [reminderMinute, setReminderMinute] = useState(String(settings.reminderMinute).padStart(2, '0'));
+  const [bankConnected, setBankConnected] = useState(false);
+  const [bankChecking, setBankChecking] = useState(true);
+  const [bankSyncing, setBankSyncing] = useState(false);
+  const [showBankPeriodPicker, setShowBankPeriodPicker] = useState(false);
+  const [bankLastSync, setBankLastSync] = useState<string | null>(null);
+  const bankPendingAccessToken = useRef<string | null>(null);
+
+  // Themed confirm/toast modals
+  type ConfirmConfig = {icon?: string; title: string; message: string; confirmLabel: string; confirmDanger?: boolean; onConfirm: () => void};
+  const [confirmModal, setConfirmModal] = useState<ConfirmConfig | null>(null);
+  const [toast, setToast] = useState<{icon: string; message: string} | null>(null);
+  const showConfirm = (cfg: ConfirmConfig) => setConfirmModal(cfg);
+  const showToast = (icon: string, message: string) => setToast({icon, message});
 
   const blankForm = () => ({name:'', budget:'', expectedAmount:'', buffer:'', icon:'💰', color:'#6C63FF', isFixed:false, rollover:false, weekly:false, subs:[] as SubCategory[]});
   const [showAddSheet, setShowAddSheet] = useState(false);
@@ -208,6 +435,245 @@ export default function SettingsScreen() {
     setReminderHour(String(settings.reminderHour));
     setReminderMinute(String(settings.reminderMinute).padStart(2, '0'));
   }, [settings]);
+
+  // Check bank connection and load sync metadata
+  useEffect(() => {
+    isBankConnected().then(async c => {
+      setBankConnected(c);
+      if (c) {
+        const [date, firstSynced] = await Promise.all([
+          getBankLastSyncDate(),
+          getBankFirstSynced(),
+        ]);
+        setBankLastSync(date);
+        if (!firstSynced) setShowBankPeriodPicker(true);
+      }
+      setBankChecking(false);
+    });
+  }, []);
+
+  // Handle OAuth deep-link callback
+  useEffect(() => {
+    const handleUrl = async (url: string) => {
+      if (!url.startsWith('piggybudget://bank/callback')) return;
+      const params = new URLSearchParams(url.split('?')[1] ?? '');
+      const error = params.get('error');
+      const cancelled = params.get('cancelled');
+      const accessToken = params.get('access_token');
+      const refreshToken = params.get('refresh_token');
+
+      if (cancelled) return;
+      if (error) {
+        Alert.alert('Connection failed', decodeURIComponent(error));
+        return;
+      }
+      if (accessToken) {
+        await saveBankTokens(accessToken, refreshToken ?? '');
+        setBankConnected(true);
+        bankPendingAccessToken.current = accessToken;
+
+        const firstSynced = await getBankFirstSynced();
+        if (!firstSynced) {
+          setShowBankPeriodPicker(true);
+        } else {
+          const fromDate = await getBankLastSyncDate();
+          syncBankTransactions(fromDate ?? undefined, accessToken);
+        }
+      }
+    };
+
+    const sub = Linking.addEventListener('url', ({url}) => handleUrl(url));
+    Linking.getInitialURL().then(url => { if (url) handleUrl(url); });
+    return () => sub.remove();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ── Bank sync ─────────────────────────────────────────────────────────────────
+
+  const syncBankTransactions = useCallback(async (fromDate?: string, accessToken?: string) => {
+    setBankSyncing(true);
+    try {
+      const txs = await fetchBankTransactions(fromDate, accessToken);
+      if (txs.length === 0) return;
+
+      const [merchantMap, freshCategories, freshExpenses, importedTxIds] = await Promise.all([
+        getMerchantMap(),
+        storage.getCategories(),
+        storage.getExpenses(),
+        getImportedTxIds(),
+      ]);
+
+      // Skip transactions already processed in a previous sync
+      const newTxs = txs.filter(tx => !importedTxIds.has(tx.id));
+      if (newTxs.length === 0) return;
+
+      // Debits with no existing merchant mapping → send to Gemini for categorisation
+      const debitsToClassify = newTxs.filter(
+        tx => tx.type === 'debit' && !merchantMap[(tx.merchantName ?? tx.description).toLowerCase().trim()]
+      );
+
+      let geminiMap: Record<string, {categoryId: string | null; subCategoryId: string | null}> = {};
+      if (debitsToClassify.length > 0 && freshCategories.length > 0) {
+        geminiMap = await categoriseTransactions(
+          debitsToClassify.map(tx => ({
+            id: tx.id,
+            merchantName: tx.merchantName,
+            description: tx.description,
+            amount: tx.amount,
+            bankCategory: tx.category,
+          })),
+          freshCategories.map(cat => ({
+            id: cat.id,
+            name: cat.name,
+            icon: cat.icon,
+            subCategories: cat.subCategories.map(sub => ({id: sub.id, name: sub.name, icon: sub.icon})),
+          })),
+        );
+      }
+
+      // Transactions that need user review (no category found)
+      const newNotifications: BankNotification[] = [];
+      // Transactions that can be auto-confirmed (mapped merchant OR Gemini matched)
+      const autoExpenses: import('../types').Expense[] = [];
+      const unknownForNotif: Array<{tx: BankTransaction}> = [];
+
+      for (const tx of newTxs) {
+        const key = (tx.merchantName ?? tx.description).toLowerCase().trim();
+        const mapped = merchantMap[key];
+
+        if (tx.type === 'credit') {
+          const cc = classifyCredit(tx, freshExpenses);
+          if (cc.needsReview) {
+            // Probable reimbursement — send to bell so user can confirm or change
+            newNotifications.push({
+              id: uuidv4(), txId: tx.id, date: tx.date, amount: tx.amount,
+              type: 'credit', merchantName: tx.merchantName ?? tx.description,
+              description: tx.description,
+              suggestedCategoryId: null, suggestedSubCategoryId: null,
+              reimbursementReason: cc.reason,
+              suggestedIncomeType: 'reimbursement',
+            });
+          } else {
+            addIncomeEvent(cc.event);
+          }
+        } else if (mapped) {
+          // Known merchant — auto-add as expense directly
+          autoExpenses.push({
+            id: uuidv4(),
+            categoryId: mapped.categoryId!,
+            subCategoryId: mapped.subCategoryId ?? undefined,
+            amount: tx.amount,
+            note: tx.merchantName ?? tx.description,
+            date: tx.date,
+            isRecurring: false,
+          });
+        } else {
+          // Unknown merchant — check Gemini result
+          const gemini = geminiMap[tx.id];
+          const categoryId = gemini?.categoryId ?? null;
+          const subCategoryId = gemini?.subCategoryId ?? null;
+
+          if (categoryId) {
+            // Gemini found a match — auto-add as expense and save merchant mapping
+            autoExpenses.push({
+              id: uuidv4(),
+              categoryId,
+              subCategoryId: subCategoryId ?? undefined,
+              amount: tx.amount,
+              note: tx.merchantName ?? tx.description,
+              date: tx.date,
+              isRecurring: false,
+            });
+            // Learn this merchant so next sync skips Gemini entirely
+            saveMerchantEntry(
+              tx.merchantName ?? tx.description,
+              categoryId,
+              subCategoryId ?? undefined,
+            ).catch(() => {});
+          } else {
+            // Gemini couldn't categorise — send to bell for manual review
+            newNotifications.push(makeBankNotification(tx, null, null));
+            unknownForNotif.push({tx});
+          }
+        }
+      }
+
+      // Auto-confirmed expenses (known merchant or Gemini-matched) — add directly, skip bell
+      for (const exp of autoExpenses) {
+        addExpense(exp);
+      }
+
+      // Only truly unrecognised transactions go to the bell queue
+      if (newNotifications.length > 0) {
+        await addBankNotifications(newNotifications);
+        // Fire system tray notification only for unrecognised transactions
+        const firedMerchants = new Set<string>();
+        for (const {tx} of unknownForNotif) {
+          const merchant = tx.merchantName ?? tx.description;
+          if (!firedMerchants.has(merchant)) {
+            firedMerchants.add(merchant);
+            fireBankTransactionNotification({
+              txId: tx.id,
+              merchantName: merchant,
+              amount: tx.amount,
+              currency: settings.currency,
+            }).catch(() => {});
+          }
+        }
+      }
+
+      // Record all processed txIds to prevent duplicates on next sync
+      await addImportedTxIds(newTxs.map(tx => tx.id));
+
+      const now = format(new Date(), 'yyyy-MM-dd');
+      await saveBankLastSyncDate(now);
+      setBankLastSync(now);
+    } catch (err: any) {
+      Alert.alert('Sync failed', err?.message ?? 'Could not fetch transactions');
+      if (err?.message?.includes('reconnect') || err?.message?.includes('expired')) {
+        await clearBankTokens();
+        setBankConnected(false);
+      }
+    } finally {
+      setBankSyncing(false);
+    }
+  }, [categories, addExpense, addIncomeEvent, addBankNotifications, settings.currency]);
+
+  const handleBankFirstSyncConfirm = useCallback(async (fromDate: string | null) => {
+    setShowBankPeriodPicker(false);
+    await setBankFirstSynced();
+    await syncBankTransactions(fromDate ?? undefined, bankPendingAccessToken.current ?? undefined);
+    bankPendingAccessToken.current = null;
+  }, [syncBankTransactions]);
+
+  const handleBankConnect = async () => {
+    try {
+      setBankChecking(true);
+      const authUrl = await getBankAuthUrl();
+      await Linking.openURL(authUrl);
+    } catch (err: any) {
+      Alert.alert('Error', err?.message ?? 'Could not start bank connection');
+    } finally {
+      setBankChecking(false);
+    }
+  };
+
+  const handleDisconnectBank = () => {
+    showConfirm({
+      icon: '🔌',
+      title: 'Disconnect bank?',
+      message: 'Your bank connection will be removed. Pending notifications will remain until cleared.',
+      confirmLabel: 'Disconnect',
+      confirmDanger: true,
+      onConfirm: async () => {
+        setConfirmModal(null);
+        await clearBankTokens();
+        setBankConnected(false);
+        setBankLastSync(null);
+        bankPendingAccessToken.current = null;
+      },
+    });
+  };
 
   const openEdit = (cat: Category) => {
     setEditForm({
@@ -274,15 +740,19 @@ export default function SettingsScreen() {
   };
 
   const handleDeleteCategory = (id: string, name: string) => {
-    Alert.alert(`Delete "${name}"?`, 'Expenses will lose their label.', [
-      {text: 'Cancel', style: 'cancel'},
-      {text: 'Delete', style: 'destructive', onPress: () => deleteCategory(id)},
-    ]);
+    showConfirm({
+      icon: '🗑️',
+      title: `Delete "${name}"?`,
+      message: 'Expenses in this category will lose their label.',
+      confirmLabel: 'Delete category',
+      confirmDanger: true,
+      onConfirm: () => { setConfirmModal(null); deleteCategory(id); },
+    });
   };
 
   const handleExportCSV = async () => {
     if (expenses.length === 0) { Alert.alert('Nothing to export', 'No expenses yet.'); return; }
-    const csv = buildCSV(expenses, categories, settings.currency);
+    const csv = buildCSV(expenses, categories, settings.currency, incomeEvents);
     const filename = `budget_export_${format(new Date(), 'yyyy-MM-dd')}.csv`;
     try {
       await Share.share({title: filename, message: Platform.OS === 'android' ? csv : undefined, url: Platform.OS === 'ios' ? `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}` : undefined});
@@ -315,8 +785,8 @@ export default function SettingsScreen() {
               <View style={{flex: 1}}>
                 <Text style={s.catRowName}>{cat.name}</Text>
                 <Text style={s.catRowMeta}>
-                  {cat.budget > 0 ? `€${cat.budget}/mo` : 'No limit'}
-                  {cat.expectedAmount > 0 ? ` · exp €${cat.expectedAmount}+${cat.buffer}` : ''}
+                  {cat.budget > 0 ? `${settings.currency}${cat.budget}/mo` : 'No limit'}
+                  {cat.expectedAmount > 0 ? ` · exp ${settings.currency}${cat.expectedAmount}+${cat.buffer}` : ''}
                   {(cat.subCategories?.length ?? 0) > 0 ? ` · ${cat.subCategories.length} subs` : ''}
                   {cat.weeklyTracking ? ' · 📅' : ''}
                   {cat.rollover ? ' · ♻️' : ''}
@@ -340,15 +810,17 @@ export default function SettingsScreen() {
           <View style={{flexDirection: 'row', gap: 8}}>
             <View style={{width: 72}}>
               <Text style={s.fieldLabel}>Currency</Text>
-              <TextInput style={s.input} placeholder="€" placeholderTextColor={colors.textSecondary} value={currency} onChangeText={setCurrency} maxLength={4} onBlur={() => handleSaveSettings()} />
+              <TextInput style={s.input} placeholder="€" placeholderTextColor={colors.textSecondary} value={currency} onChangeText={v => { setCurrency(v); setBudgetSaved(false); }} maxLength={4} onBlur={() => handleSaveSettings()} />
             </View>
             <View style={{flex: 1}}>
               <Text style={s.fieldLabel}>Monthly income / allowance</Text>
-              <TextInput style={s.input} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.textSecondary} value={income} onChangeText={setIncome} onBlur={() => handleSaveSettings()} />
+              <TextInput style={s.input} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.textSecondary} value={income} onChangeText={v => { setIncome(v); setBudgetSaved(false); }} onBlur={() => handleSaveSettings()} />
             </View>
           </View>
-          <TouchableOpacity style={s.saveBtn} onPress={() => handleSaveSettings().then(() => Alert.alert('✅ Saved', 'Budget settings updated.'))}>
-            <Text style={s.saveBtnText}>Save</Text>
+          <TouchableOpacity
+            style={[s.saveBtn, {backgroundColor: budgetSaved ? darkenColor(colors.primary) : colors.primary}]}
+            onPress={async () => { await handleSaveSettings(); setBudgetSaved(true); }}>
+            <Text style={s.saveBtnText}>{budgetSaved ? 'Saved' : 'Save'}</Text>
           </TouchableOpacity>
         </View>
 
@@ -411,13 +883,123 @@ export default function SettingsScreen() {
           )}
         </View>
 
+        {/* ── More ── */}
+        <Text style={s.sectionTitle}>More</Text>
+        <View style={s.card}>
+          <SettingsRow icon="💳" label="Subscriptions" hint="Track recurring payments" onPress={() => navigation.navigate('Subscriptions')} />
+          <SettingsRow icon="💚" label="Income" hint="Income and received amounts" onPress={() => navigation.navigate('Income')} noBorder />
+        </View>
+
+        {/* ── Bank ── */}
+        <Text style={s.sectionTitle}>Bank</Text>
+        <View style={s.card}>
+          {bankChecking ? (
+            <View style={{padding: spacing.md, alignItems: 'center'}}>
+              <ActivityIndicator size="small" color={colors.primary} />
+            </View>
+          ) : !bankConnected ? (
+            <View style={{padding: spacing.md, alignItems: 'center'}}>
+              <Text style={{fontSize: 40, marginBottom: spacing.sm}}>🏦</Text>
+              <Text style={[s.settingsRowLabel, {textAlign: 'center', marginBottom: 4}]}>Connect Your Bank</Text>
+              <Text style={[s.settingsRowHint, {textAlign: 'center', marginBottom: spacing.md, lineHeight: 18}]}>
+                Securely connect via Open Banking. Your credentials never touch our servers.
+              </Text>
+              <TouchableOpacity style={[s.saveBtn, {width: '100%'}]} onPress={handleBankConnect}>
+                <Text style={s.saveBtnText}>Connect Your Bank</Text>
+              </TouchableOpacity>
+              <Text style={[s.settingsRowHint, {marginTop: spacing.sm, textAlign: 'center'}]}>
+                🔒 Powered by TrueLayer — PSD2 regulated open banking
+              </Text>
+            </View>
+          ) : (
+            <>
+              <View style={[s.settingsRow, {paddingVertical: 12}]}>
+                <View style={{width: 8, height: 8, borderRadius: 4, backgroundColor: '#10B981', marginRight: 10}} />
+                <View style={{flex: 1}}>
+                  <Text style={s.settingsRowLabel}>Bank connected</Text>
+                  {bankLastSync && (
+                    <Text style={s.settingsRowHint}>Last synced: {bankLastSync}</Text>
+                  )}
+                </View>
+                <TouchableOpacity
+                  style={{borderWidth: 1, borderColor: colors.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6}}
+                  onPress={() => syncBankTransactions(bankLastSync ?? undefined)}
+                  disabled={bankSyncing}>
+                  {bankSyncing
+                    ? <ActivityIndicator size="small" color={colors.primary} />
+                    : <Text style={{color: colors.primary, fontWeight: '600', fontSize: 13}}>🔄 Sync</Text>}
+                </TouchableOpacity>
+              </View>
+
+              <SettingsRow
+                icon="🗑️"
+                label="Clear all transactions"
+                hint="Remove all imported expenses and income, keep settings"
+                onPress={() => showConfirm({
+                  icon: '🧹',
+                  title: 'Clear all transactions?',
+                  message: 'All imported expenses and income will be deleted. Your categories, budget settings, and bank connection will be kept.',
+                  confirmLabel: 'Clear transactions',
+                  confirmDanger: true,
+                  onConfirm: async () => {
+                    setConfirmModal(null);
+                    await storage.saveExpenses([]);
+                    await storage.saveIncomeEvents([]);
+                    await reload();
+                    showToast('✅', 'All transactions cleared');
+                  },
+                })}
+              />
+              <SettingsRow
+                icon="🔌"
+                label="Disconnect Bank"
+                hint="Remove your bank connection"
+                onPress={handleDisconnectBank}
+                noBorder
+              />
+            </>
+          )}
+        </View>
+
         {/* ── Data ── */}
         <Text style={s.sectionTitle}>Data</Text>
         <View style={s.card}>
-          <SettingsRow icon="📤" label="Export as CSV" hint={`${expenses.length} expense${expenses.length !== 1 ? 's' : ''} ready to export`} onPress={handleExportCSV} noBorder />
+          <SettingsRow icon="📤" label="Export as CSV" hint={`${expenses.length} expense${expenses.length !== 1 ? 's' : ''} + ${incomeEvents.length} income event${incomeEvents.length !== 1 ? 's' : ''}`} onPress={handleExportCSV} />
+          <SettingsRow icon="🗑️" label="Delete all data" hint="Permanently removes all expenses and settings" onPress={() => showConfirm({
+            icon: '⚠️',
+            title: 'Delete all data?',
+            message: 'This will permanently remove all your expenses, categories, income, and settings. This cannot be undone.',
+            confirmLabel: 'Delete everything',
+            confirmDanger: true,
+            onConfirm: async () => {
+              setConfirmModal(null);
+              const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+              await AsyncStorage.clear();
+              await reload();
+              showToast('🗑️', 'All data deleted');
+            },
+          })} noBorder />
+        </View>
+
+        {/* ── Legal ── */}
+        <Text style={s.sectionTitle}>Legal</Text>
+        <View style={s.card}>
+          <SettingsRow icon="🔒" label="Privacy Policy" hint="How we handle your data" onPress={() => Linking.openURL('https://budget-api-sigma.vercel.app/api/privacy')} />
+          <SettingsRow icon="📄" label="Terms of Service" hint="Rules for using PiggyBudget" onPress={() => Linking.openURL('https://budget-api-sigma.vercel.app/api/terms')} noBorder />
         </View>
 
       </ScrollView>
+
+      {/* ── Period picker for bank first-sync ── */}
+      <PeriodPickerModal
+        visible={showBankPeriodPicker}
+        onConfirm={handleBankFirstSyncConfirm}
+        onCancel={() => {
+          setShowBankPeriodPicker(false);
+          setBankFirstSynced();
+          bankPendingAccessToken.current = null;
+        }}
+      />
 
       {/* ── Add Category Sheet ── */}
       <BottomSheet visible={showAddSheet} onClose={() => setShowAddSheet(false)} title="New Category">
@@ -460,6 +1042,28 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
       </BottomSheet>
+
+      {/* ── Themed confirm dialog ── */}
+      {confirmModal && (
+        <ConfirmModal
+          visible={!!confirmModal}
+          icon={confirmModal.icon}
+          title={confirmModal.title}
+          message={confirmModal.message}
+          confirmLabel={confirmModal.confirmLabel}
+          confirmDanger={confirmModal.confirmDanger}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
+
+      {/* ── Success toast ── */}
+      <ToastModal
+        visible={!!toast}
+        icon={toast?.icon ?? '✅'}
+        message={toast?.message ?? ''}
+        onDone={() => setToast(null)}
+      />
     </View>
   );
 }
@@ -517,9 +1121,11 @@ const makeStyles = (colors: ReturnType<typeof import('../context/ThemeContext').
     colorCircleSelected: {borderColor: colors.text},
 
     // Bottom sheet
-    sheetOverlay: {flex: 1, backgroundColor: 'transparent', justifyContent: 'flex-end'},
-    sheetCard: {backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '90%', borderWidth: 0},
-    sheetHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border},
+    sheetOverlay: {flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end'},
+    sheetCard: {backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, maxHeight: '92%'},
+    sheetHandleArea: {paddingTop: 10, paddingBottom: 8, paddingHorizontal: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border},
+    sheetDragBar: {width: 36, height: 4, borderRadius: 2, backgroundColor: colors.border, alignSelf: 'center', marginBottom: 10},
+    sheetTitleRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
     sheetTitle: {...typography.subtitle, color: colors.text, fontWeight: '700'},
     sheetClose: {fontSize: 18, color: colors.textSecondary, padding: 4},
   });
